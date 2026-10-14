@@ -1,0 +1,75 @@
+Dim swApp As Object
+Dim swModel As Object
+Dim outFile As Object
+
+Sub DumpFeatures()
+    Dim f As Object
+    Dim sf As Object
+    Dim dd As Object
+    Dim d As Object
+    Dim def As Object
+    Dim warning As Boolean
+    On Error Resume Next
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        outFile.WriteLine "FEATURE " & f.Name & " TYPE=" & f.GetTypeName2
+        Set dd = f.GetFirstDisplayDimension
+        Do While Not dd Is Nothing
+            Set d = dd.GetDimension2(0)
+            outFile.WriteLine " DIM " & d.FullName & "=" & d.SystemValue
+            Set dd = f.GetNextDisplayDimension(dd)
+        Loop
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                outFile.WriteLine " MATE " & sf.Name & " ERROR=" & sf.GetErrorCode2(warning)
+                Set dd = sf.GetFirstDisplayDimension
+                Do While Not dd Is Nothing
+                    Set d = dd.GetDimension2(0)
+                    outFile.WriteLine " DIM " & d.FullName & "=" & d.SystemValue
+                    Set dd = sf.GetNextDisplayDimension(dd)
+                Loop
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+End Sub
+
+Sub main()
+    Dim fso As Object
+    Dim f As Object
+    Dim sf As Object
+    Dim c48 As Object
+    Dim ok As Boolean
+    On Error Resume Next
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set outFile = fso.CreateTextFile("C:\Users\RobotComp.ru\Desktop\dpw_project\tools\mate48\loop-report.txt", True, True)
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                If sf.GetTypeName2 = "MateConcentric" And Right(sf.Name, 2) = "48" Then Set c48 = sf
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    If c48 Is Nothing Then
+        outFile.WriteLine "MISSING TARGET"
+        outFile.Close
+        Exit Sub
+    End If
+    outFile.WriteLine "TEST WITHOUT48"
+    ok = c48.SetSuppression2(0, 1, Empty)
+    ok = swModel.ForceRebuild3(False)
+    DumpFeatures
+    outFile.WriteLine "RESTORE48"
+    ok = c48.SetSuppression2(1, 1, Empty)
+    ok = swModel.ForceRebuild3(False)
+    outFile.WriteLine "DONE"
+    outFile.Close
+End Sub

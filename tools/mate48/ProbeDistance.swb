@@ -1,0 +1,84 @@
+Dim swApp As Object
+Dim swModel As Object
+Dim outFile As Object
+
+Function ErrorCount() As Long
+    Dim f As Object
+    Dim sf As Object
+    Dim warning As Boolean
+    Dim code As Long
+    Dim total As Long
+    On Error Resume Next
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                code = sf.GetErrorCode2(warning)
+                If code <> 0 Then
+                    total = total + 1
+                    outFile.WriteLine " ERROR " & sf.Name & " code=" & code
+                End If
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    ErrorCount = total
+End Function
+
+Sub main()
+    Dim fso As Object
+    Dim f As Object
+    Dim sf As Object
+    Dim d4 As Object
+    Dim d5 As Object
+    Dim c48 As Object
+    Dim count As Long
+    Dim ok As Boolean
+    On Error Resume Next
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set outFile = fso.CreateTextFile("C:\Users\RobotComp.ru\Desktop\dpw_project\tools\mate48\distance-probe.txt", True, True)
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                If sf.GetTypeName2 = "MateDistanceDim" Then
+                    If Right(sf.Name, 1) = "4" Then Set d4 = sf
+                    If Right(sf.Name, 1) = "5" Then Set d5 = sf
+                End If
+                If sf.GetTypeName2 = "MateConcentric" And Right(sf.Name, 2) = "48" Then Set c48 = sf
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    If d4 Is Nothing Or d5 Is Nothing Or c48 Is Nothing Then
+        outFile.WriteLine "MISSING EXPECTED MATE"
+        outFile.Close
+        Exit Sub
+    End If
+    outFile.WriteLine "BASELINE"
+    count = ErrorCount()
+    outFile.WriteLine "COUNT " & count
+    outFile.WriteLine "TEST SUPPRESS DISTANCE4"
+    ok = d4.SetSuppression2(0, 1, Empty)
+    ok = swModel.ForceRebuild3(False)
+    count = ErrorCount()
+    outFile.WriteLine "COUNT " & count
+    If count = 0 Then
+        outFile.WriteLine "KEPT DISTANCE4 SUPPRESSED; CONCENTRIC48 ACTIVE"
+    Else
+        ok = d4.SetSuppression2(1, 1, Empty)
+        ok = swModel.ForceRebuild3(False)
+        outFile.WriteLine "RESTORED ORIGINAL DISTANCE4"
+    End If
+    swModel.ClearSelection2 True
+    swModel.GraphicsRedraw2
+    outFile.WriteLine "DONE"
+    outFile.Close
+End Sub
+

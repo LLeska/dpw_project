@@ -1,0 +1,102 @@
+Dim swApp As Object
+Dim swModel As Object
+Dim outFile As Object
+
+Function Values(v As Variant) As String
+    Dim i As Long
+    Dim s As String
+    On Error Resume Next
+    If IsArray(v) Then
+        For i = LBound(v) To UBound(v)
+            s = s & CStr(v(i)) & ";"
+        Next i
+    End If
+    Values = s
+End Function
+
+Sub DumpMate(f As Object)
+    Dim mate As Object
+    Dim ent As Object
+    Dim comp As Object
+    Dim def As Object
+    Dim i As Long
+    Dim warn As Boolean
+    On Error Resume Next
+    Set mate = f.GetSpecificFeature2
+    If mate Is Nothing Then Exit Sub
+    outFile.WriteLine "MATE " & f.Name & " type=" & f.GetTypeName2 & " error=" & f.GetErrorCode2(warn)
+    outFile.WriteLine " ALIGN " & mate.Alignment
+    outFile.WriteLine " SUPPRESSED " & Values(f.IsSuppressed2(1, Empty))
+    Set def = f.GetDefinition
+    outFile.WriteLine " LOCK_ROTATION " & def.LockRotation
+    For i = 0 To mate.GetMateEntityCount - 1
+        Set ent = mate.MateEntity(i)
+        Set comp = ent.ReferenceComponent
+        If comp Is Nothing Then
+            outFile.WriteLine " ENTITY <assembly> type=" & ent.ReferenceType & " params=" & Values(ent.EntityParams)
+        Else
+            outFile.WriteLine " ENTITY " & comp.Name2 & " type=" & ent.ReferenceType & " params=" & Values(ent.EntityParams)
+        End If
+    Next i
+End Sub
+
+Sub main()
+    Dim f As Object
+    Dim sf As Object
+    Dim comps As Variant
+    Dim comp As Object
+    Dim i As Long
+    Dim fso As Object
+    On Error Resume Next
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set outFile = fso.CreateTextFile("C:\Users\RobotComp.ru\Desktop\dpw_project\tools\mate48\resolved-offsets.txt", True, True)
+    Dim c48 As Object
+    Dim ok As Boolean
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                If sf.GetTypeName2 = "MateConcentric" And Right(sf.Name, 2) = "48" Then Set c48 = sf
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    If c48 Is Nothing Then
+        outFile.WriteLine "MISSING TARGET"
+        outFile.Close
+        Exit Sub
+    End If
+    outFile.WriteLine "BASELINE48"
+    DumpMate c48
+    ok = c48.SetSuppression2(0, 1, Empty)
+    ok = swModel.ForceRebuild3(False)
+    outFile.WriteLine "SOLVED WITHOUT48 " & ok
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                DumpMate sf
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    comps = swModel.GetComponents(False)
+    If IsArray(comps) Then
+        For i = LBound(comps) To UBound(comps)
+            Set comp = comps(i)
+            outFile.WriteLine "COMP " & comp.Name2 & " PATH=" & comp.GetPathName & " fixed=" & comp.IsFixed & " status=" & comp.GetConstrainedStatus & " transform=" & Values(comp.Transform2.ArrayData)
+        Next i
+    End If
+    outFile.WriteLine "RESTORING48"
+    ok = c48.SetSuppression2(1, 1, Empty)
+    ok = swModel.ForceRebuild3(False)
+    outFile.WriteLine "DONE"
+    outFile.Close
+End Sub
+

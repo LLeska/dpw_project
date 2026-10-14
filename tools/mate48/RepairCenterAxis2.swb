@@ -1,0 +1,172 @@
+Dim swApp As Object
+Dim swModel As Object
+Dim outFile As Object
+
+Function MateErrorCount() As Long
+    Dim f As Object
+    Dim sf As Object
+    Dim warn As Boolean
+    Dim n As Long
+    On Error Resume Next
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                If sf.GetErrorCode2(warn) <> 0 Then
+                    n = n + 1
+                    outFile.WriteLine " ERROR " & sf.Name & "=" & sf.GetErrorCode2(warn)
+                End If
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    MateErrorCount = n
+End Function
+
+Sub main()
+    Dim fso As Object
+    Dim f As Object
+    Dim sf As Object
+    Dim target As Object
+    Dim mate As Object
+    Dim car As Object
+    Dim part As Object
+    Dim originFeature As Object
+    Dim originPoint As Object
+    Dim selectedComp As Object
+    Dim ent As Object
+    Dim edge As Object
+    Dim faces As Variant
+    Dim face As Object
+    Dim surface As Object
+    Dim cylinder As Object
+    Dim tr As Variant
+    Dim center As Variant
+    Dim newEntities(1) As Object
+    Dim oldEntities As Variant
+    Dim def As Object
+    Dim oldAlign As Long
+    Dim j As Long
+    Dim count As Long
+    Dim dx As Double
+    Dim dy As Double
+    Dim dz As Double
+    Dim axisNorm As Double
+    Dim axisDistance As Double
+    Dim ok As Boolean
+    On Error Resume Next
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set outFile = fso.CreateTextFile("C:\Users\RobotComp.ru\Desktop\dpw_project\tools\mate48\center-repair.txt", True, True)
+    Set f = swModel.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "MateGroup" Then
+            Set sf = f.GetFirstSubFeature
+            Do While Not sf Is Nothing
+                If sf.GetTypeName2 = "MateConcentric" And Right(sf.Name, 2) = "48" Then Set target = sf
+                Set sf = sf.GetNextSubFeature
+            Loop
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    If target Is Nothing Then
+        outFile.WriteLine "MISSING TARGET"
+        outFile.Close
+        Exit Sub
+    End If
+    Set mate = target.GetSpecificFeature2
+    Set car = mate.MateEntity(0).ReferenceComponent
+    tr = car.Transform2.ArrayData
+    center = mate.MateEntity(0).EntityParams
+    outFile.WriteLine "TARGET " & target.Name & " CAR " & car.Name2
+    dx = tr(9) - center(0)
+    dy = tr(10) - center(1)
+    dz = tr(11) - center(2)
+    axisNorm = Sqr(center(3) ^ 2 + center(4) ^ 2 + center(5) ^ 2)
+    axisDistance = Sqr((dy * center(5) - dz * center(4)) ^ 2 + (dz * center(3) - dx * center(5)) ^ 2 + (dx * center(4) - dy * center(3)) ^ 2) / axisNorm
+    outFile.WriteLine "ORIGIN_TO_HOLE_AXIS_M " & axisDistance
+    If axisDistance > 0.00000001 Or axisNorm < 0.9 Then
+        outFile.WriteLine "ORIGIN IS NOT ON HOLE AXIS; NO CHANGE"
+        outFile.Close
+        Exit Sub
+    End If
+    Set part = car.GetModelDoc2
+    Set f = part.FirstFeature
+    Do While Not f Is Nothing
+        If f.GetTypeName2 = "OriginProfileFeature" Then
+            Set originFeature = f
+            Exit Do
+        End If
+        Set f = f.GetNextFeature
+    Loop
+    If originFeature Is Nothing Then
+        outFile.WriteLine "MISSING ORIGIN"
+        outFile.Close
+        Exit Sub
+    End If
+    swModel.ClearSelection2 True
+    ok = swModel.Extension.SelectByID2("Point1@" & originFeature.Name & "@" & car.GetSelectByIDString, "EXTSKETCHPOINT", 0, 0, 0, False, 1, Nothing, 0)
+    outFile.WriteLine "ORIGIN_SELECTED " & ok
+    Set originPoint = swModel.SelectionManager.GetSelectedObject6(1, -1)
+    Set selectedComp = swModel.SelectionManager.GetSelectedObjectsComponent4(1, -1)
+    outFile.WriteLine "SELECTED_COMPONENT " & selectedComp.Name2
+    If Not ok Or originPoint Is Nothing Or selectedComp Is Nothing Then
+        outFile.WriteLine "ORIGIN SELECTION FAILED; NO CHANGE"
+        outFile.Close
+        Exit Sub
+    End If
+    If selectedComp.Name2 <> car.Name2 Then
+        outFile.WriteLine "WRONG ORIGIN; NO CHANGE"
+        outFile.Close
+        Exit Sub
+    End If
+    Set ent = mate.MateEntity(1)
+    Set edge = ent.Reference
+    faces = edge.GetTwoAdjacentFaces2
+    If IsArray(faces) Then
+        For j = LBound(faces) To UBound(faces)
+            Set face = faces(j)
+            Set surface = face.GetSurface
+            If surface.IsCylinder Then
+                Set cylinder = face
+                Exit For
+            End If
+        Next j
+    End If
+    If cylinder Is Nothing Then
+        outFile.WriteLine "MISSING HOLE CYLINDER; NO CHANGE"
+        outFile.Close
+        Exit Sub
+    End If
+    Set newEntities(0) = originPoint
+    Set newEntities(1) = cylinder
+    Set def = target.GetDefinition
+    oldEntities = def.EntitiesToMate
+    oldAlign = def.MateAlignment
+    def.EntitiesToMate = newEntities
+    def.MateAlignment = 2
+    def.LockRotation = False
+    ok = target.ModifyDefinition(def, swModel, Nothing)
+    outFile.WriteLine "MODIFIED " & ok & " API_ERROR " & Err.Number & " " & Err.Description
+    ok = swModel.ForceRebuild3(False)
+    outFile.WriteLine "REBUILT " & ok
+    count = MateErrorCount()
+    outFile.WriteLine "ERROR_COUNT " & count
+    If count = 0 And ok Then
+        outFile.WriteLine "REPAIR KEPT; CONCENTRIC48 ACTIVE; CENTER ON SAME HOLE AXIS"
+    Else
+        Set def = target.GetDefinition
+        def.EntitiesToMate = oldEntities
+        def.MateAlignment = oldAlign
+        ok = target.ModifyDefinition(def, swModel, Nothing)
+        ok = swModel.ForceRebuild3(False)
+        outFile.WriteLine "ORIGINAL REFERENCES RESTORED"
+    End If
+    swModel.ClearSelection2 True
+    swModel.GraphicsRedraw2
+    outFile.WriteLine "DONE"
+    outFile.Close
+End Sub
