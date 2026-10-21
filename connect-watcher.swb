@@ -1,0 +1,55 @@
+Private Type WatcherGUID
+    Data1 As Long
+    Data2 As Integer
+    Data3 As Integer
+    Data4(0 To 7) As Byte
+End Type
+
+Private Declare PtrSafe Function CLSIDFromProgID Lib "ole32.dll" (ByVal progIdPointer As LongPtr, ByRef classId As WatcherGUID) As Long
+Private Declare PtrSafe Function RegisterActiveObject Lib "oleaut32.dll" (ByVal objectPointer As LongPtr, ByRef classId As WatcherGUID, ByVal flags As Long, ByRef registration As Long) As Long
+
+Dim swApp As Object
+
+Sub main()
+    Dim fso As Object
+    Dim report As Object
+    Dim classId As WatcherGUID
+    Dim registration As Long
+    Dim result As Long
+    Dim progId As String
+    Dim macroFolder As String
+    Dim reportFolder As String
+    Dim models As Variant
+    Dim model As Object
+    Dim equations As Object
+    Dim i As Long
+    Dim j As Long
+    On Error Resume Next
+    Set swApp = Application.SldWorks
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    macroFolder = fso.GetParentFolderName(swApp.GetCurrentMacroPathName)
+    reportFolder = fso.BuildPath(macroFolder, ".watch-equations")
+    If Not fso.FolderExists(reportFolder) Then fso.CreateFolder reportFolder
+    Set report = fso.CreateTextFile(fso.BuildPath(reportFolder, "connection.txt"), True, True)
+    progId = "SldWorks.Application"
+    result = CLSIDFromProgID(StrPtr(progId), classId)
+    report.WriteLine "CLASS_ID_RESULT " & result & " ERROR " & Err.Number & " " & Err.Description
+    If result = 0 Then
+        Err.Clear
+        result = RegisterActiveObject(ObjPtr(swApp), classId, 1, registration)
+        report.WriteLine "REGISTER_RESULT " & result & " COOKIE " & registration & " ERROR " & Err.Number & " " & Err.Description
+    End If
+    models = swApp.GetDocuments
+    If IsArray(models) Then
+        For i = LBound(models) To UBound(models)
+            Set model = models(i)
+            Set equations = model.GetEquationMgr
+            report.WriteLine "DOC " & model.GetTitle & " LINK " & equations.LinkToFile & " FILE " & equations.FilePath
+            For j = 0 To equations.GetCount - 1
+                If InStr(equations.Equation(j), "Высота пола") > 0 Then report.WriteLine "FLOOR " & equations.Equation(j) & " VALUE " & equations.Value(j)
+            Next j
+        Next i
+    End If
+    report.WriteLine "DONE"
+    report.Close
+End Sub

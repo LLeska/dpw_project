@@ -1,4 +1,9 @@
-﻿param([string]$EquationFile)
+﻿param(
+    [string]$EquationFile = (Join-Path $PSScriptRoot "equations.txt"),
+    [switch]$Once,
+    [switch]$Inspect,
+    [switch]$BuildOnly
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -14,10 +19,15 @@ function StableHash([string]$Path) {
                     $Path,
                     [System.IO.FileMode]::Open,
                     [System.IO.FileAccess]::Read,
-                    [System.IO.FileShare]::ReadWrite
+                    ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
                 )
-                $s.Close()
-                return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+                try {
+                    if ($s.Length -eq 0) { throw "Equations file is empty." }
+                    $sha = [System.Security.Cryptography.SHA256]::Create()
+                    try {
+                        return [BitConverter]::ToString($sha.ComputeHash($s)).Replace('-', '')
+                    } finally { $sha.Dispose() }
+                } finally { $s.Dispose() }
             }
         } catch {}
         Start-Sleep -Milliseconds 120
@@ -58,7 +68,7 @@ function Find-CSharpCompiler {
 }
 
 function Build-Helper([string]$InteropPath) {
-    $helperDir = Join-Path $env:LOCALAPPDATA "SWEquationWatcher\v9-safe"
+    $helperDir = Join-Path $PSScriptRoot ".watch-equations"
     New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
 
     $localInterop = Join-Path $helperDir "SolidWorks.Interop.sldworks.dll"
@@ -72,6 +82,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Text.RegularExpressions;
 using SolidWorks.Interop.sldworks;
@@ -87,7 +98,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args == null || args.Length != 1 || String.IsNullOrWhiteSpace(args[0]))
+        if (args == null || args.Length < 1 || String.IsNullOrWhiteSpace(args[0]))
         {
             Console.WriteLine("ERROR: equations.txt path was not supplied.");
             return 10;
@@ -101,14 +112,14 @@ internal static class Program
             return 10;
         }
 
-        List<FileVariable> fileVariables = ReadGlobalVariables(equationsPath);
+        bool inspect = args.Length > 1 && args[1] == "--inspect";
+        ReadGlobalVariables(equationsPath); // Reject an unreadable source before touching models.
 
         ISldWorks swApp;
 
         try
         {
-            object running = Marshal.GetActiveObject("SldWorks.Application");
-            swApp = running as ISldWorks;
+            swApp = ConnectToSolidWorks();
 
             if (swApp == null)
             {
@@ -142,12 +153,11 @@ internal static class Program
 
         int linkedDocs = 0;
         int skippedDocs = 0;
-        int addedVariables = 0;
-        int addErrors = 0;
         int refreshTrue = 0;
         int refreshFalse = 0;
         int refreshErrors = 0;
         int rebuildErrors = 0;
+        var linkedModels = new List<IModelDoc2>();
 
         foreach (IModelDoc2 model in docs)
         {
@@ -184,6 +194,20 @@ internal static class Program
                 }
 
                 linkedDocs++;
+                linkedModels.Add(model);
+
+                if (inspect)
+                {
+                    Console.WriteLine("LINKED: " + title + " -> " + linkedPath);
+                    for (int i = 0; i < eq.GetCount(); i++)
+                    {
+                        string line = eq.get_Equation(i);
+                        if (eq.get_GlobalVariable(i) && (ParseLeftHandQuotedName(line) == "Высота пола" ||
+                            ParseLeftHandQuotedName(line) == "Толщина стенки"))
+                            Console.WriteLine("  " + line + " | value=" + eq.get_Value(i));
+                    }
+                    continue;
+                }
 
                 // SAFE MODE: never mutate the equation manager and never re-link/re-export.
                 // The watched equations.txt is strictly read-only from this helper's point of view.
@@ -194,9 +218,15 @@ internal static class Program
                     bool ok = eq.UpdateValuesFromExternalEquationFile();
 
                     if (ok)
+                    {
                         refreshTrue++;
+                        Console.WriteLine("UPDATED: " + title);
+                    }
                     else
+                    {
                         refreshFalse++;
+                        Console.WriteLine("ERROR: Equation refresh returned false for '" + title + "'.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -215,17 +245,32 @@ internal static class Program
             }
         }
 
-        for (int pass = 1; pass <= 2; pass++)
+        if (linkedDocs == 0)
         {
-            foreach (IModelDoc2 model in docs)
+            Console.WriteLine("ERROR: No open documents are linked to " + equationsPath);
+            return 5;
+        }
+
+        // Refresh every linked equation first, then rebuild parts before assemblies.
+        // Unrelated open documents must not be rebuilt by this watcher.
+        if (!inspect && refreshFalse == 0 && refreshErrors == 0)
+        for (int type = 1; type <= 2; type++)
+        {
+            foreach (IModelDoc2 model in linkedModels)
             {
                 try
                 {
-                    model.ForceRebuild3(false);
+                    if (model.GetType() != type) continue;
+                    if (!model.ForceRebuild3(false))
+                    {
+                        rebuildErrors++;
+                        Console.WriteLine("ERROR: Rebuild returned false for '" + SafeTitle(model) + "'.");
+                    }
                 }
-                catch
+                catch (Exception ex)
                 {
                     rebuildErrors++;
+                    Console.WriteLine("ERROR: Rebuild failed for '" + SafeTitle(model) + "': " + ex.Message);
                 }
             }
         }
@@ -234,21 +279,75 @@ internal static class Program
             "Done. Open docs=" + docs.Count +
             ", linked to watched file=" + linkedDocs +
             ", skipped=" + skippedDocs +
-            ", new globals added=" + addedVariables +
-            ", add errors=" + addErrors +
             ", equation refresh OK=" + refreshTrue +
             ", equation returned false=" + refreshFalse +
             ", refresh errors=" + refreshErrors +
             ", rebuild errors=" + rebuildErrors + "."
         );
 
-        return (addErrors == 0 && refreshErrors == 0 && rebuildErrors == 0) ? 0 : 4;
+        return (refreshFalse == 0 && refreshErrors == 0 && rebuildErrors == 0) ? 0 : 4;
     }
 
     private static string SafeTitle(IModelDoc2 model)
     {
         try { return model.GetTitle(); }
         catch { return "<unknown>"; }
+    }
+
+    [DllImport("ole32.dll")]
+    private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable table);
+
+    [DllImport("ole32.dll")]
+    private static extern int CreateBindCtx(int reserved, out IBindCtx context);
+
+    private static ISldWorks ConnectToSolidWorks()
+    {
+        try
+        {
+            ISldWorks active = Marshal.GetActiveObject("SldWorks.Application") as ISldWorks;
+            if (active != null) return active;
+        }
+        catch (COMException) { }
+
+        // Some sessions publish only a process-specific SolidWorks ROT moniker.
+        // Attach to the existing application; never create another SolidWorks instance.
+        IRunningObjectTable table = null;
+        IBindCtx context = null;
+        IEnumMoniker enumerator = null;
+        ISldWorks found = null;
+        try
+        {
+            Marshal.ThrowExceptionForHR(GetRunningObjectTable(0, out table));
+            Marshal.ThrowExceptionForHR(CreateBindCtx(0, out context));
+            table.EnumRunning(out enumerator);
+            var item = new IMoniker[1];
+            while (enumerator.Next(1, item, IntPtr.Zero) == 0)
+            {
+                try
+                {
+                    string name;
+                    item[0].GetDisplayName(context, null, out name);
+                    if (!name.StartsWith("SolidWorks_PID_", StringComparison.OrdinalIgnoreCase)) continue;
+                    object running;
+                    table.GetObject(item[0], out running);
+                    ISldWorks candidate = running as ISldWorks;
+                    if (candidate == null) continue;
+                    if (found != null)
+                        throw new InvalidOperationException("Multiple SolidWorks instances are running; close the unused instance.");
+                    found = candidate;
+                }
+                finally { Marshal.ReleaseComObject(item[0]); }
+            }
+        }
+        finally
+        {
+            if (enumerator != null) Marshal.ReleaseComObject(enumerator);
+            if (context != null) Marshal.ReleaseComObject(context);
+            if (table != null) Marshal.ReleaseComObject(table);
+        }
+        if (found == null)
+            throw new InvalidOperationException("Cannot attach to running SolidWorks. Run the watcher in the same Windows session and at the same privilege level as SolidWorks.");
+        return found;
     }
 
     private static bool SamePath(string a, string b)
@@ -384,7 +483,7 @@ internal static class Program
         throw "Could not find .NET Framework csc.exe."
     }
 
-    Log "Building SolidWorks helper v7..."
+    Log "Building SolidWorks equations helper..."
 
     $compilerOutput = & $csc `
         /nologo `
@@ -402,113 +501,152 @@ internal static class Program
     return $exePath
 }
 
-$interop = Find-SolidWorksInterop
+function Watch-EquationFile {
+    param(
+        [string]$Path,
+        [scriptblock]$Synchronize,
+        [switch]$SinglePass,
+        [int]$PollMilliseconds = 500,
+        [int]$SettleMilliseconds = 700,
+        [int]$RetryMilliseconds = 5000,
+        [scriptblock]$ShouldStop = { $false }
+    )
 
-if ([string]::IsNullOrWhiteSpace($interop)) {
-    Write-Host "Could not find SolidWorks.Interop.sldworks.dll."
-    Read-Host "Press Enter to exit"
-    exit 1
-}
+    $appliedHash = $null
+    $candidateHash = $null
+    $stableSince = [DateTime]::UtcNow
+    $nextAttempt = [DateTime]::MinValue
 
-Log "Using SolidWorks interop:"
-Write-Host "  $interop"
-
-try {
-    $helperExe = Build-Helper $interop
-}
-catch {
-    Write-Host "Failed to build helper:"
-    Write-Host $_.Exception.Message
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-Log "Helper ready:"
-Write-Host "  $helperExe"
-
-if ([string]::IsNullOrWhiteSpace($EquationFile)) {
-    $defaultEquationFile = Join-Path $PSScriptRoot "equations.txt"
-
-    if (Test-Path -LiteralPath $defaultEquationFile) {
-        Write-Host ""
-        Write-Host "Found equations.txt next to the watcher:"
-        Write-Host "  $defaultEquationFile"
-
-        $answer = Read-Host "Use this file? [Y/n]"
-
-        $useDefault = (
-            [string]::IsNullOrWhiteSpace($answer) -or
-            $answer -match '^(?i:y|yes|д|да)$'
-        )
-
-        if ($useDefault) {
-            $EquationFile = $defaultEquationFile
+    while (-not (& $ShouldStop)) {
+        try {
+            $hash = StableHash $Path
+        } catch {
+            if ($SinglePass) { throw }
+            Start-Sleep -Milliseconds $PollMilliseconds
+            continue
         }
-        else {
-            $EquationFile = Read-Host "Full path to equations.txt"
+
+        $now = [DateTime]::UtcNow
+        if ($hash -ne $candidateHash) {
+            $candidateHash = $hash
+            $stableSince = $now
+            $nextAttempt = [DateTime]::MinValue
         }
-    }
-    else {
-        $EquationFile = Read-Host "Full path to equations.txt"
-    }
-}
 
-try {
-    $resolved = Resolve-Path -LiteralPath $EquationFile
-    $EquationFile = $resolved.ProviderPath
-}
-catch {
-    Write-Host "File not found: $EquationFile"
-    Read-Host "Press Enter to exit"
-    exit 1
-}
+        if ($hash -ne $appliedHash -and
+            ($now - $stableSince).TotalMilliseconds -ge $SettleMilliseconds -and
+            $now -ge $nextAttempt) {
+            Log 'Synchronizing equations with SolidWorks...'
+            $success = $false
+            try { $success = [bool](& $Synchronize) }
+            catch { Log "Synchronization failed: $($_.Exception.Message)" }
 
-try {
-    $lastHash = StableHash $EquationFile
-}
-catch {
-    Write-Host "Cannot initially read equations file: $EquationFile"
-    Write-Host $_.Exception.Message
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-Log "Watching by polling: $EquationFile"
-Log "On change: add missing globals, refresh linked equations, rebuild documents."
-Log "Polling interval: 0.5 s. Ctrl+C stops the watcher."
-
-while ($true) {
-    Start-Sleep -Milliseconds 500
-
-    try {
-        $newHash = StableHash $EquationFile
-    }
-    catch {
-        # Network share can briefly be unavailable during save/reconnect.
-        continue
-    }
-
-    if ($newHash -eq $lastHash) {
-        continue
-    }
-
-    $lastHash = $newHash
-    Log "equations.txt changed -> synchronizing SolidWorks"
-
-    try {
-        $output = & $helperExe $EquationFile 2>&1
-
-        foreach ($line in @($output)) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
-                Log ([string]$line)
+            if ($success) {
+                # A failed attempt must never consume a file change.
+                # If the file changed during synchronization, the next pass applies it too.
+                $appliedHash = $hash
+                Log 'Equations applied successfully.'
+                if ($SinglePass -and (StableHash $Path) -eq $appliedHash) { return 0 }
+            } else {
+                Log 'Not applied. The same file version will be retried.'
+                if ($SinglePass) { return 4 }
+                $nextAttempt = [DateTime]::UtcNow.AddMilliseconds($RetryMilliseconds)
             }
         }
-
-        if ($LASTEXITCODE -ne 0) {
-            Log "Helper exit code: $LASTEXITCODE"
-        }
+        Start-Sleep -Milliseconds $PollMilliseconds
     }
-    catch {
-        Log "Could not run helper: $($_.Exception.Message)"
+    return 0
+}
+
+function Start-EquationWatcher {
+    param([string]$Path, [switch]$SinglePass, [switch]$ReadOnly, [switch]$CompileOnly)
+
+    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    $interop = Find-SolidWorksInterop
+    if ([string]::IsNullOrWhiteSpace($interop)) {
+        throw 'Could not find SolidWorks.Interop.sldworks.dll.'
+    }
+
+    # Only one watcher (or one-shot update) may use this file at a time.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $key = [BitConverter]::ToString($sha.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($resolvedPath.ToUpperInvariant())
+        )).Replace('-', '')
+    } finally { $sha.Dispose() }
+    $mutex = New-Object Threading.Mutex($false, "Local\SWEquationWatcher_$key")
+    $owned = $false
+    $connectionState = @{ Lease = $null }
+    try {
+        try { $owned = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'Another watcher is already using this equations file.' }
+
+        $helperExe = Build-Helper $interop
+        Log "Helper ready: $helperExe"
+        if ($CompileOnly) { return 0 }
+
+        if (-not ('SwEquationConnection' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SwEquationConnection {
+    [DllImport("oleaut32.dll", PreserveSig = false)]
+    private static extern void GetActiveObject(ref Guid classId, IntPtr reserved,
+        [MarshalAs(UnmanagedType.IUnknown)] out object instance);
+    public static object Attach() {
+        Guid classId = Type.GetTypeFromProgID("SldWorks.Application", true).GUID;
+        object instance;
+        GetActiveObject(ref classId, IntPtr.Zero, out instance);
+        return instance;
+    }
+}
+'@
+        }
+
+        if ($ReadOnly) {
+            $connectionState.Lease = [SwEquationConnection]::Attach()
+            & $helperExe $resolvedPath '--inspect' | ForEach-Object { Log ([string]$_) }
+            return $LASTEXITCODE
+        }
+
+        $sync = {
+            # Keep the application COM object alive between short-lived helper calls.
+            # A weak ROT registration otherwise disappears when the helper exits.
+            if ($null -eq $connectionState.Lease) {
+                $connectionState.Lease = [SwEquationConnection]::Attach()
+            }
+            $output = & $helperExe $resolvedPath 2>&1
+            $helperExitCode = $LASTEXITCODE
+            foreach ($line in @($output)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Log ([string]$line) }
+            }
+            if ($helperExitCode -ne 0) { Log "Helper exit code: $helperExitCode" }
+            if ($helperExitCode -eq 2 -and $null -ne $connectionState.Lease) {
+                [void][Runtime.InteropServices.Marshal]::ReleaseComObject($connectionState.Lease)
+                $connectionState.Lease = $null
+            }
+            return ($helperExitCode -eq 0)
+        }.GetNewClosure()
+
+        Log "Equations file: $resolvedPath"
+        Log 'Apply at startup, then watch changes. Ctrl+C stops the watcher.'
+        return (Watch-EquationFile -Path $resolvedPath -Synchronize $sync -SinglePass:$SinglePass)
+    } finally {
+        if ($null -ne $connectionState.Lease) {
+            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($connectionState.Lease)
+        }
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+# Dot-sourcing loads functions for focused tests without connecting to SolidWorks.
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        exit (Start-EquationWatcher -Path $EquationFile -SinglePass:$Once -ReadOnly:$Inspect -CompileOnly:$BuildOnly)
+    } catch {
+        Write-Error $_ -ErrorAction Continue
+        exit 1
     }
 }
