@@ -251,17 +251,34 @@ internal static class Program
             return 5;
         }
 
-        // Refresh every linked equation first, then rebuild parts before assemblies.
-        // Unrelated open documents must not be rebuilt by this watcher.
+        // In-context Tab and Slot / Cavity parts must rebuild in their assembly.
+        // Rebuilding those parts individually can leave their receiver features stale.
         if (!inspect && refreshFalse == 0 && refreshErrors == 0)
-        for (int type = 1; type <= 2; type++)
         {
+            var assemblyMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (IModelDoc2 model in linkedModels)
+            {
+                if (model.GetType() != 2) continue;
+                object[] components = ((IAssemblyDoc)model).GetComponents(false) as object[];
+                foreach (object item in components ?? new object[0])
+                {
+                    IComponent2 component = item as IComponent2;
+                    if (component != null) assemblyMembers.Add(component.GetPathName());
+                }
+            }
+            IModelDoc2 previousActive = swApp.ActiveDoc as IModelDoc2;
+            try
+            {
             foreach (IModelDoc2 model in linkedModels)
             {
                 try
                 {
-                    if (model.GetType() != type) continue;
-                    if (!model.ForceRebuild3(false))
+                    int type = model.GetType();
+                    if (type == 1 && assemblyMembers.Contains(model.GetPathName())) continue;
+                    if (type != 1 && type != 2) continue;
+                    int activationError = 0;
+                    swApp.ActivateDoc3(model.GetTitle(), false, 2, ref activationError);
+                    if (!model.ForceRebuild3(false) || (type == 2 && !model.EditRebuild3()))
                     {
                         rebuildErrors++;
                         Console.WriteLine("ERROR: Rebuild returned false for '" + SafeTitle(model) + "'.");
@@ -271,6 +288,15 @@ internal static class Program
                 {
                     rebuildErrors++;
                     Console.WriteLine("ERROR: Rebuild failed for '" + SafeTitle(model) + "': " + ex.Message);
+                }
+            }
+            }
+            finally
+            {
+                if (previousActive != null)
+                {
+                    int activationError = 0;
+                    swApp.ActivateDoc3(previousActive.GetTitle(), false, 2, ref activationError);
                 }
             }
         }
