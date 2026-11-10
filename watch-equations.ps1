@@ -89,6 +89,7 @@ using SolidWorks.Interop.sldworks;
 
 internal static class Program
 {
+    private const int DoNotRebuildOnActivation = 1; // swDontRebuildActiveDoc
     private sealed class FileVariable
     {
         public string Name;
@@ -113,7 +114,12 @@ internal static class Program
         }
 
         bool inspect = args.Length > 1 && args[1] == "--inspect";
-        ReadGlobalVariables(equationsPath); // Reject an unreadable source before touching models.
+        List<FileVariable> fileVariables = ReadGlobalVariables(equationsPath);
+        if (fileVariables.Count == 0)
+        {
+            Console.WriteLine("ERROR: equations file contains no global variables.");
+            return 10;
+        }
 
         ISldWorks swApp;
 
@@ -213,28 +219,6 @@ internal static class Program
                 // The watched equations.txt is strictly read-only from this helper's point of view.
                 // Only existing linked equations are refreshed from the external file.
 
-                try
-                {
-                    bool ok = eq.UpdateValuesFromExternalEquationFile();
-
-                    if (ok)
-                    {
-                        refreshTrue++;
-                        Console.WriteLine("UPDATED: " + title);
-                    }
-                    else
-                    {
-                        refreshFalse++;
-                        Console.WriteLine("ERROR: Equation refresh returned false for '" + title + "'.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    refreshErrors++;
-                    Console.WriteLine(
-                        "Equation refresh failed for '" + title + "': " + ex.Message
-                    );
-                }
             }
             catch (Exception ex)
             {
@@ -251,55 +235,9 @@ internal static class Program
             return 5;
         }
 
-        // In-context Tab and Slot / Cavity parts must rebuild in their assembly.
-        // Rebuilding those parts individually can leave their receiver features stale.
-        if (!inspect && refreshFalse == 0 && refreshErrors == 0)
-        {
-            var assemblyMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (IModelDoc2 model in linkedModels)
-            {
-                if (model.GetType() != 2) continue;
-                object[] components = ((IAssemblyDoc)model).GetComponents(false) as object[];
-                foreach (object item in components ?? new object[0])
-                {
-                    IComponent2 component = item as IComponent2;
-                    if (component != null) assemblyMembers.Add(component.GetPathName());
-                }
-            }
-            IModelDoc2 previousActive = swApp.ActiveDoc as IModelDoc2;
-            try
-            {
-            foreach (IModelDoc2 model in linkedModels)
-            {
-                try
-                {
-                    int type = model.GetType();
-                    if (type == 1 && assemblyMembers.Contains(model.GetPathName())) continue;
-                    if (type != 1 && type != 2) continue;
-                    int activationError = 0;
-                    swApp.ActivateDoc3(model.GetTitle(), false, 2, ref activationError);
-                    if (!model.ForceRebuild3(false) || (type == 2 && !model.EditRebuild3()))
-                    {
-                        rebuildErrors++;
-                        Console.WriteLine("ERROR: Rebuild returned false for '" + SafeTitle(model) + "'.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    rebuildErrors++;
-                    Console.WriteLine("ERROR: Rebuild failed for '" + SafeTitle(model) + "': " + ex.Message);
-                }
-            }
-            }
-            finally
-            {
-                if (previousActive != null)
-                {
-                    int activationError = 0;
-                    swApp.ActivateDoc3(previousActive.GetTitle(), false, 2, ref activationError);
-                }
-            }
-        }
+        if (!inspect && refreshErrors == 0)
+            RefreshInBatch(swApp, linkedModels, fileVariables, ref refreshTrue, ref refreshFalse,
+                ref refreshErrors, ref rebuildErrors);
 
         Console.WriteLine(
             "Done. Open docs=" + docs.Count +
@@ -312,6 +250,167 @@ internal static class Program
         );
 
         return (refreshFalse == 0 && refreshErrors == 0 && rebuildErrors == 0) ? 0 : 4;
+    }
+
+    private static void RefreshInBatch(ISldWorks swApp, List<IModelDoc2> models, List<FileVariable> fileVariables,
+        ref int refreshed, ref int refused, ref int refreshErrors, ref int rebuildErrors)
+    {
+        var changedModels = new List<IModelDoc2>();
+        var automaticRebuild = new List<bool>();
+        IModelDoc2 previousActive = swApp.ActiveDoc as IModelDoc2;
+        try
+        {
+            // Stage every manager before importing any linked variable. Otherwise
+            // each import may rebuild an in-context part before its neighbours update.
+            foreach (IModelDoc2 model in models)
+            {
+                IEquationMgr eq = model.GetEquationMgr();
+                if (!RequiresEquationRefresh(eq, fileVariables))
+                {
+                    Console.WriteLine("UNCHANGED: " + SafeTitle(model));
+                    continue;
+                }
+                changedModels.Add(model);
+                automaticRebuild.Add(eq.AutomaticRebuild);
+            }
+            if (changedModels.Count == 0)
+            {
+                Console.WriteLine("Linked definitions already match; no rebuild required.");
+                return;
+            }
+            // Capture every original value first: this setting is shared by
+            // equation managers in some SOLIDWORKS sessions.
+            foreach (IModelDoc2 model in changedModels)
+                ((IEquationMgr)model.GetEquationMgr()).AutomaticRebuild = false;
+            for (int i = 0; i < changedModels.Count; i++)
+            {
+                try
+                {
+                    if (((IEquationMgr)changedModels[i].GetEquationMgr()).UpdateValuesFromExternalEquationFile())
+                    {
+                        refreshed++;
+                        Console.WriteLine("UPDATED: " + SafeTitle(changedModels[i]));
+                    }
+                    else
+                    {
+                        refused++;
+                        Console.WriteLine("ERROR: Equation refresh returned false for '" + SafeTitle(changedModels[i]) + "'.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    refreshErrors++;
+                    Console.WriteLine("ERROR: Equation refresh failed for '" + SafeTitle(changedModels[i]) + "': " + ex.Message);
+                }
+            }
+            if (refused != 0 || refreshErrors != 0) return;
+            foreach (IModelDoc2 model in changedModels)
+                ((IEquationMgr)model.GetEquationMgr()).EvaluateAll();
+
+            // Rebuild in the highest linked assembly context, once per root.
+            var members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (IModelDoc2 model in models)
+            {
+                if (model.GetType() != 2) continue;
+                foreach (object item in ((IAssemblyDoc)model).GetComponents(false) as object[] ?? new object[0])
+                {
+                    IComponent2 component = item as IComponent2;
+                    if (component != null) members.Add(component.GetPathName());
+                }
+            }
+            foreach (IModelDoc2 model in models)
+            {
+                int type = model.GetType();
+                if ((type != 1 && type != 2) || members.Contains(model.GetPathName())) continue;
+                try
+                {
+                    int activationError = 0;
+                    IModelDoc2 active = swApp.ActiveDoc as IModelDoc2;
+                    if (active == null || !SamePath(active.GetPathName(), model.GetPathName()))
+                        swApp.ActivateDoc3(model.GetTitle(), false, DoNotRebuildOnActivation, ref activationError);
+                    active = swApp.ActiveDoc as IModelDoc2;
+                    if (active == null || !SamePath(active.GetPathName(), model.GetPathName()))
+                        throw new InvalidOperationException("Cannot activate the rebuild context.");
+                    bool ok = model.EditRebuild3();
+                    if (!ok)
+                    {
+                        Console.WriteLine("Incremental rebuild failed; trying full rebuild: " + SafeTitle(model));
+                        ok = model.ForceRebuild3(false);
+                    }
+                    if (!ok)
+                    {
+                        rebuildErrors++;
+                        Console.WriteLine("ERROR: Rebuild returned false for '" + SafeTitle(model) + "'.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    rebuildErrors++;
+                    Console.WriteLine("ERROR: Rebuild failed for '" + SafeTitle(model) + "': " + ex.Message);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            refreshErrors++;
+            Console.WriteLine("ERROR: Cannot stage equation update: " + ex.Message);
+        }
+        finally
+        {
+            for (int i = 0; i < changedModels.Count; i++)
+            {
+                // Rebuilds can switch component configurations. A cached manager
+                // must not be reused after that switch (SOLIDWORKS API requirement).
+                try { ((IEquationMgr)changedModels[i].GetEquationMgr()).AutomaticRebuild = automaticRebuild[i]; }
+                catch (Exception ex)
+                {
+                    rebuildErrors++;
+                    Console.WriteLine("ERROR: Cannot restore automatic rebuild: " + ex.Message);
+                }
+            }
+            if (previousActive != null)
+            {
+                IModelDoc2 active = swApp.ActiveDoc as IModelDoc2;
+                if (active == null || !SamePath(active.GetPathName(), previousActive.GetPathName()))
+                {
+                    int activationError = 0;
+                    swApp.ActivateDoc3(previousActive.GetTitle(), false, DoNotRebuildOnActivation, ref activationError);
+                }
+            }
+        }
+    }
+
+    private static bool RequiresEquationRefresh(IEquationMgr eq, List<FileVariable> source)
+    {
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (FileVariable variable in source)
+            expected[variable.Name] = NormalizeEquation(variable.EquationLine);
+        int matched = 0;
+        int count = eq.GetCount();
+        for (int i = 0; i < count; i++)
+        {
+            string line = eq.get_Equation(i);
+            string name = ParseLeftHandQuotedName(line);
+            string required;
+            if (name == null || !expected.TryGetValue(name, out required)) continue;
+            if (NormalizeEquation(line) != required) return true;
+            matched++;
+            if (matched == expected.Count) return false;
+        }
+        // Refresh existing variables only, as UpdateValuesFromExternalEquationFile does.
+        return matched == 0;
+    }
+
+    private static string NormalizeEquation(string line)
+    {
+        var result = new StringBuilder();
+        bool quoted = false;
+        foreach (char c in line)
+        {
+            if (c == '"') quoted = !quoted;
+            if (quoted || !Char.IsWhiteSpace(c)) result.Append(c);
+        }
+        return result.ToString();
     }
 
     private static string SafeTitle(IModelDoc2 model)
