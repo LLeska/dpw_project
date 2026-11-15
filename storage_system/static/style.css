@@ -1,0 +1,64 @@
+/* Стили для карточек ячеек */
+.cells-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.cells-row {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+}
+
+.cell-card {
+    width: 250px;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    padding: 15px;
+    transition: all 0.3s ease;
+}
+
+.cell-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.cell-free {
+    background-color: #d4edda;
+    border-color: #28a745;
+}
+
+.cell-occupied {
+    background-color: #fff3cd;
+    border-color: #ffc107;
+}
+
+.cell-header {
+    text-align: center;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(0,0,0,0.1);
+}
+
+.cell-body {
+    min-height: 80px;
+}
+
+.cell-footer {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(0,0,0,0.1);
+    text-align: center;
+}
+
+/* Адаптивность */
+@media (max-width: 768px) {
+    .cells-row {
+        flex-direction: column;
+    }
+    
+    .cell-card {
+        width: 100%;
+    }
+}

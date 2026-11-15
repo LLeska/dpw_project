@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Журнал операций{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header bg-primary text-white">
+        <h5 class="mb-0">📋 Журнал операций</h5>
+    </div>
+    <div class="card-body">
+        {% if operations %}
+        <table class="table table-striped">
+            <thead>
+                <tr>

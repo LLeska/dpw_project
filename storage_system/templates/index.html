@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+
+{% block title %}Ячейки хранения{% endblock %}
+
+{% block content %}
+{% if demo_mode %}
+<div class="alert alert-info alert-dismissible fade show">
+    <strong>🎭 Демо-режим активен!</strong> Система работает без подключенной Arduino.
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
+<!-- Статистика -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-white bg-success">
+            <div class="card-body">
+                <h5 class="card-title">Свободных ячеек</h5>
+                <h2>{{ stats.free_cells }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-warning">
+            <div class="card-body">
+                <h5 class="card-title">Занятых ячеек</h5>
+                <h2>{{ stats.occupied_cells }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-info">
+            <div class="card-body">
+                <h5 class="card-title">Всего посылок</h5>
+                <h2>{{ stats.total_packages }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-primary">
+            <div class="card-body">
+                <h5 class="card-title">Операций</h5>
+                <h2>{{ stats.total_operations }}</h2>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Регистрация посылки -->
+<div class="card mb-4">
+    <div class="card-header bg-success text-white">
+        <h5 class="mb-0">Регистрация новой посылки</h5>
+    </div>
+    <div class="card-body">
+        <form id="register-form">
+            <div class="row">
+                <div class="col-md-3">
+                    <label class="form-label">Ячейка</label>
+                    <select class="form-select" name="cell_id" required>
+                        {% for cell in cells %}
+                        {% if cell.status == 'free' %}
+                        <option value="{{ cell.id }}">Ряд {{ cell.row }}, Столбец {{ cell.col }}</option>
+                        {% endif %}
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">ID посылки</label>
+                    <input type="text" class="form-control" name="package_id" placeholder="PKG-001" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Вес (кг)</label>
+                    <input type="number" class="form-control" name="weight" step="0.1" max="1.0" value="0.5" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Габариты (ДxШxВ)</label>
+                    <input type="text" class="form-control" name="dimensions" placeholder="120x80x80" value="120x80x80" required>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-success w-100">Зарегистрировать</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Матрица ячеек -->
+<div class="card">
+    <div class="card-header bg-info text-white">
+        <h5 class="mb-0">Матрица ячеек хранения</h5>
+    </div>
+    <div class="card-body">
+        <div class="cells-grid">
+            {% for row in range(2) %}
+            <div class="cells-row">
+                {% for col in range(2) %}
+                    {% set cell = cells | selectattr('row', 'equalto', row) | selectattr('col', 'equalto', col) | first %}
+                    <div class="cell-card {% if cell.status == 'free' %}cell-free{% else %}cell-occupied{% endif %}">
+                        <div class="cell-header">
+                            <strong>Ячейка [{{ row }},{{ col }}]</strong>
+                        </div>
+                        <div class="cell-body">
+                            {% if cell.status == 'free' %}
+                                <span class="badge bg-success">Свободна</span>
+                            {% else %}
+                                <span class="badge bg-warning">Занята</span>
+                                <p class="mt-2 mb-1"><strong>Посылка:</strong> {{ cell.package_id }}</p>
+                                <button class="btn btn-warning btn-sm w-100 mt-2 retrieve-btn" data-cell="{{ cell.id }}">
+                                    📤 Выдать посылку
+                                </button>
+                            {% endif %}
+                        </div>
+                        <div class="cell-footer">
+                            <small class="text-muted">X:{{ cell.x_coord }}мм Z:{{ cell.z_coord }}мм</small>
+                        </div>
+                    </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно -->
+<div class="modal fade" id="messageModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Уведомление</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="message-text"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" data-bs-dismiss="modal">OK</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('register-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    
+    const response = await fetch('/register', {
+        method: 'POST',
+        body: formData
+    });
+    
+    const data = await response.json();
+    showMessage(data.message);
+    
+    if (data.success) {
+        setTimeout(() => location.reload(), 1000);
+    }
+});
+
+document.querySelectorAll('.retrieve-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const cellId = btn.dataset.cell;
+        if (!confirm(`Выдать посылку из этой ячейки?`)) return;
+        
+        btn.disabled = true;
+        btn.textContent = '⏳ Выполняется...';
+        
+        const response = await fetch(`/retrieve/${cellId}`, { method: 'POST' });
+        const data = await response.json();
+        
+        showMessage(data.message);
+        
+        if (data.success) {
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            btn.disabled = false;
+            btn.textContent = '📤 Выдать посылку';
+        }
+    });
+});
+
+function showMessage(text) {
+    document.getElementById('message-text').textContent = text;
+    const modal = new bootstrap.Modal(document.getElementById('messageModal'));
+    modal.show();
+}
+</script>
+{% endblock %}
