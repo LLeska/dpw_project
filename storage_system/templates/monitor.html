@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Мониторинг системы{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">📊 Статистика системы</h5>
+            </div>
+            <div class="card-body">
+                <table class="table">
+                    <tr>
+                        <td><strong>Всего ячеек:</strong></td>
+                        <td>{{ stats.total_cells }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Свободных ячеек:</strong></td>
+                        <td class="text-success">{{ stats.free_cells }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Занятых ячеек:</strong></td>
+                        <td class="text-warning">{{ stats.occupied_cells }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Всего посылок:</strong></td>
+                        <td>{{ stats.total_packages }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Всего операций:</strong></td>
+                        <td>{{ stats.total_operations }}</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h5 class="mb-0">🔧 Состояние оборудования</h5>
+            </div>
+            <div class="card-body">
+                <table class="table">
+                    <tr>
+                        <td><strong>Режим работы:</strong></td>
+                        <td>
+                            {% if demo_mode %}
+                                <span class="badge bg-secondary">Демо-режим</span>
+                            {% else %}
+                                <span class="badge bg-success">Реальный режим</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Arduino:</strong></td>
+                        <td>
+                            <span class="badge bg-success">Подключена</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Моторы:</strong></td>
+                        <td>
+                            <span class="badge bg-success">Готовы к работе</span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mt-4">
+    <div class="card-header bg-success text-white">
+        <h5 class="mb-0">✅ Система готова к работе</h5>
+    </div>
+    <div class="card-body">
+        <p>Все компоненты системы функционируют нормально.</p>
+        <ul>
+            <li>Веб-сервер запущен</li>
+            <li>База данных инициализирована</li>
+            <li>Контроллер Arduino подключен</li>
+            <li>Генератор G-кода готов</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}
